@@ -1,0 +1,153 @@
+def process_data(self):
+    """Procesa todo el archivo JSON para extraer información de usuarios"""
+    if not self.data:
+        print("No hay datos cargados. Ejecute load_data() primero.")
+        return False
+
+    # Inicializar recolección de datos
+    self.users = {}
+    self.user_messages = {}
+    self.message_counts = {}
+
+    # Diccionario para almacenar handles de Telegram (@username)
+    telegram_handles = {}
+
+    if 'chats' in self.data and 'list' in self.data['chats']:
+        print(f"Encontrados {len(self.data['chats']['list'])} chats")
+
+        for chat in self.data['chats']['list']:
+            chat_name = chat.get('name', 'Sin nombre')
+            print(f"\nProcesando chat: {chat_name}")
+
+            if 'messages' in chat:
+                print(f"  - {len(chat['messages'])} mensajes")
+
+                for msg in chat['messages']:
+                    if 'from' in msg:
+                        user_id = msg.get('from_id', '')
+                        username = msg.get('from', '')  # Nombre mostrado
+                        
+                        # Buscar el handle de Telegram (@username) en el texto del mensaje
+                        text = ""
+                        if 'text' in msg:
+                            if isinstance(msg['text'], str):
+                                text = msg['text']
+                            elif isinstance(msg['text'], list):
+                                for item in msg['text']:
+                                    if isinstance(item, str):
+                                        text += item + " "
+                                    elif isinstance(item, dict) and 'text' in item:
+                                        text += item['text'] + " "
+                        
+                        # Buscar menciones en el texto que podrían ser handles
+                        # Esto es para encontrar handles cuando los usuarios mencionan a otros
+                        mentions = re.findall(r'@([a-zA-Z0-9_]+)', text)
+                        
+                        # Buscar más específicamente en los datos del mensaje
+                        # Algunas exportaciones de Telegram pueden incluir el username directamente
+                        telegram_username = msg.get('username', None)
+                        
+                        # Si encontramos un username específico, guardarlo
+                        if telegram_username and user_id not in telegram_handles:
+                            telegram_handles[user_id] = f"@{telegram_username}"
+                        
+                        # Si hay menciones y parece que el usuario menciona su propio username
+                        # (esto es una heurística y puede necesitar ajustes)
+                        if mentions and user_id not in telegram_handles:
+                            for mention in mentions:
+                                if mention.lower() in text.lower()[:50]:  # Primeros 50 caracteres
+                                    telegram_handles[user_id] = f"@{mention}"
+                                    break
+                        
+                        # Conteo de mensajes por usuario
+                        if user_id:
+                            if user_id not in self.message_counts:
+                                self.message_counts[user_id] = 0
+                            self.message_counts[user_id] += 1
+
+                        # Almacenar mensaje para análisis posterior
+                        if user_id:
+                            if user_id not in self.user_messages:
+                                self.user_messages[user_id] = []
+                            self.user_messages[user_id].append(text)
+
+                        # Almacenar información del usuario
+                        if user_id and user_id not in self.users:
+                            # Formatear fecha en formato legible
+                            date_str = msg.get('date', '')
+                            try:
+                                date_obj = datetime.strptime(date_str, '%Y-%m-%dT%H:%M:%S')
+                                formatted_date = date_obj.strftime('%Y-%m-%d')
+                            except:
+                                formatted_date = date_str
+
+                            # Construir nombre completo
+                            first_name = msg.get('from_first_name', '')
+                            last_name = msg.get('from_last_name', '')
+                            display_name = username  # El campo 'from' va a Display Name
+                            personal_handle = f"{first_name} {last_name}".strip()  # Nombre completo 
+
+                            self.users[user_id] = {
+                                'ID': user_id,  # ID original
+                                'Telegram ID': user_id,  # ID de Telegram
+                                'Telegram Handle': None,  # Inicialmente vacío, lo llenaremos después
+                                'Username': user_id.replace('user', ''),  # ID numérico sin 'user'
+                                'Personal Handle': personal_handle,  # Nombre completo
+                                'Display Name': display_name,  # Campo 'from' de Telegram
+                                'Chat': chat_name,
+                                'Last Activity': formatted_date,
+                                'Registration date': formatted_date,  # Primera actividad como aproximación
+                                'Wallet': self.extract_wallet(text),
+                                'Message Count': 1  # Inicializamos el conteo
+                            }
+        
+        # Segundo paso: buscar menciones cruzadas para identificar handles
+        all_text = {}
+        for user_id, messages in self.user_messages.items():
+            all_text[user_id] = ' '.join(messages)
+        
+        # Para cada usuario, buscar en todos los mensajes menciones que podrían ser su handle
+        for user_id, text in all_text.items():
+            if user_id in self.users and not telegram_handles.get(user_id):
+                display_name = self.users[user_id]['Display Name'].lower()
+                # Buscar patrones como "@username [mensaje]" donde username es similar al display_name
+                matches = re.findall(r'@([a-zA-Z0-9_]+)', text)
+                for match in matches:
+                    # Si el handle es similar al nombre mostrado, es probable que sea correcto
+                    if display_name and match.lower() in display_name.lower() or display_name.lower() in match.lower():
+                        telegram_handles[user_id] = f"@{match}"
+                        break
+        
+        # Buscar menciones en todos los mensajes para usuarios que aún no tienen handle
+        for user_id in self.users.keys():
+            if user_id not in telegram_handles:
+                for other_id, messages in self.user_messages.items():
+                    if user_id == other_id:
+                        continue
+                    all_text = ' '.join(messages)
+                    display_name = self.users[user_id]['Display Name'].lower()
+                    # Buscar menciones que coincidan con el nombre mostrado
+                    mentions = re.findall(r'@([a-zA-Z0-9_]+)', all_text)
+                    for mention in mentions:
+                        if display_name and (mention.lower() in display_name.lower() or display_name.lower() in mention.lower()):
+                            telegram_handles[user_id] = f"@{mention}"
+                            break
+                    if user_id in telegram_handles:
+                        break
+        
+        # Casos especiales conocidos (para asegurar que tengamos al menos estos correctos)
+        known_handles = {
+            'user624865695': '@troopdegen',  # Mel
+            # Añade aquí más handles conocidos
+        }
+        telegram_handles.update(known_handles)
+        
+        # Actualizar los usuarios con sus handles
+        for user_id, handle in telegram_handles.items():
+            if user_id in self.users:
+                self.users[user_id]['Telegram Handle'] = handle
+        
+        # Procesar mensajes para análisis profundo
+        for user_id, messages in self.user_messages.items():
+            if user_id in self.users:
+                # Resto del código de análisis...
